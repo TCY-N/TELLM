@@ -1,0 +1,83 @@
+import numpy as np
+import torch
+
+import time
+
+
+class Trainer:
+
+    def __init__(self, model, optimizer, batch_size, get_batch, loss_fn, num_steps,scheduler=None, eval_fns=None, path = None, train_type = 'schedul'):
+        self.model = model
+        self.optimizer = optimizer
+        self.batch_size = batch_size
+        self.get_batch = get_batch
+        self.loss_fn = loss_fn
+        self.scheduler = scheduler
+        self.eval_fns = [] if eval_fns is None else eval_fns
+        self.diagnostics = dict()
+
+        self.start_time = time.time()
+        self.path = path
+        self.train_type = train_type
+        self.num_steps = num_steps
+
+    def train_iteration(self, iter_num=0, print_logs=False):
+
+        train_losses = []
+        logs = dict()
+
+        train_start = time.time()
+
+        self.model.train()
+        for i in range(self.num_steps):
+            train_loss = self.train_step(iter_num)
+            train_losses.append(train_loss)
+            if self.scheduler is not None:
+                self.scheduler.step()
+            if (i+1) % 20 == 0:
+                print(f'step:{iter_num}_iter{i} ',self.diagnostics)
+
+        logs['time/training'] = time.time() - train_start
+
+        eval_start = time.time()
+
+        self.model.eval()
+        for eval_fn in self.eval_fns:
+            outputs = eval_fn(self.model)
+            for k, v in outputs.items():
+                logs[f'evaluation/{k}'] = v
+
+        logs['time/total'] = time.time() - self.start_time
+        logs['time/evaluation'] = time.time() - eval_start
+        logs['training/train_loss_mean'] = np.mean(train_losses)
+        logs['training/train_loss_std'] = np.std(train_losses)
+
+        for k in self.diagnostics:
+            logs[k] = self.diagnostics[k]
+
+        if print_logs:
+            print('=' * 80)
+            print(f'Iteration {iter_num}')
+            for k, v in logs.items():
+                print(f'{k}: {v}')
+
+        return logs
+
+    def train_step(self):
+        states, actions, rewards, losses, attention_mask, returns = self.get_batch(self.batch_size)
+        state_target, action_target, reward_target = torch.clone(states), torch.clone(actions), torch.clone(rewards)
+
+        state_preds, action_preds, reward_preds = self.model.forward(
+            states, actions, rewards, masks=None, attention_mask=attention_mask, target_return=returns,
+        )
+
+        # note: currently indexing & masking is not fully correct
+        loss = self.loss_fn(
+            state_preds, action_preds, reward_preds,
+            state_target[:,1:], action_target, reward_target[:,1:],
+        )
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        return loss.detach().cpu().item()
